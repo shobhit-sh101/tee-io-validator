@@ -29,6 +29,9 @@
 #define PCI_EXPRESS_DOE_MAILBOX_TIMEOUT 300000000   // 30 second, enough for debug device to respond
 /* PCI Express - end */
 
+/* Bounce buffer used by pci_doe_send_receive_data (DOE discovery). */
+#define PCI_DOE_SEND_RECEIVE_BOUNCE_BUFFER_DW 64
+
 extern int m_dev_fp;
 extern uint32_t g_doe_extended_offset;
 extern bool g_doe_log;
@@ -312,7 +315,14 @@ libspdm_return_t device_doe_receive_message(
                                                             *((uint8_t*)(data_object_buffer + 1) + 3)));
 
             if (data_object_count * sizeof(uint32_t) > *response_size) {
-                *response_size = data_object_count * sizeof(uint32_t);  
+                TEEIO_DEBUG ((TEEIO_DEBUG_ERROR, "[device_doe_receive_message] Data object (0x%x bytes) exceeds response buffer (0x%x bytes). Drain the mailbox.\n",
+                              (uint32_t)(data_object_count * sizeof(uint32_t)), (uint32_t)*response_size));
+                /* Drain the rest of the data object so the mailbox is not left with a stale object. */
+                for (index = sizeof (pci_doe_data_object_header_t) / sizeof(uint32_t); index < data_object_count; index++) {
+                    uint32_t dummy = device_pci_doe_read_mailbox_read_32 ();
+                    device_pci_doe_read_mailbox_write_32 (dummy);
+                }
+                *response_size = data_object_count * sizeof(uint32_t);
                 return LIBSPDM_STATUS_BUFFER_TOO_SMALL;
             }
             *response_size = data_object_count * sizeof(uint32_t);
@@ -417,15 +427,54 @@ libspdm_return_t pci_doe_send_receive_data(const void *pci_doe_context,
                                         size_t *response_size, void *response)
 {
     libspdm_return_t status;
+    uint32_t doe_response[PCI_DOE_SEND_RECEIVE_BOUNCE_BUFFER_DW];
+    void *doe_response_ptr;
+    size_t doe_response_size;
+    pci_doe_data_object_header_t *doe_response_header;
+    size_t index;
+
+    if (response_size == NULL || response == NULL) {
+        return LIBSPDM_STATUS_INVALID_PARAMETER;
+    }
 
     status = device_doe_send_message (NULL, request_size, request, 0);
     if (LIBSPDM_STATUS_IS_ERROR(status)) {
         return status;
     }
-    status = device_doe_receive_message (NULL, response_size, &response, 0);
+
+    /* Receive into a bounce buffer so a device returning a longer data object
+     * than the caller expects does not fail the whole transaction. */
+    doe_response_ptr = doe_response;
+    doe_response_size = sizeof(doe_response);
+    status = device_doe_receive_message (NULL, &doe_response_size, &doe_response_ptr, 0);
     if (LIBSPDM_STATUS_IS_ERROR(status)) {
         return status;
     }
+
+    if (doe_response_size > *response_size) {
+        doe_response_header = (pci_doe_data_object_header_t *)doe_response;
+        if ((doe_response_header->vendor_id != PCI_DOE_VENDOR_ID_PCISIG) ||
+            (doe_response_header->data_object_type != PCI_DOE_DATA_OBJECT_TYPE_DOE_DISCOVERY) ||
+            (*response_size < sizeof(pci_doe_data_object_header_t) + sizeof(pci_doe_discovery_response_t))) {
+            *response_size = doe_response_size;
+            return LIBSPDM_STATUS_BUFFER_TOO_SMALL;
+        }
+
+        /* Some devices return DOE Discovery responses with trailing DWs beyond
+         * Vendor ID / Data Object Type / Next Index. Keep the defined fields
+         * and drop the trailing DWs so spdm-emu's discovery parser accepts it. */
+        TEEIO_DEBUG ((TEEIO_DEBUG_WARN, "DOE Discovery response is 0x%x bytes, expected 0x%x bytes. Ignore the trailing DWs:\n",
+                      (uint32_t)doe_response_size, (uint32_t)*response_size));
+        for (index = *response_size / sizeof(uint32_t); index < doe_response_size / sizeof(uint32_t); index++) {
+            TEEIO_DEBUG ((TEEIO_DEBUG_WARN, "  DW%d = 0x%08x\n", (int)index, doe_response[index]));
+        }
+        doe_response_size = *response_size;
+        doe_response_header->length = (uint32_t)(doe_response_size / sizeof(uint32_t));
+    }
+
+    libspdm_copy_mem (response, *response_size, doe_response, doe_response_size);
+    *response_size = doe_response_size;
+
     return LIBSPDM_STATUS_SUCCESS;
 }
 
