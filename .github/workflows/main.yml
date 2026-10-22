@@ -15,6 +15,7 @@ jobs:
     name: Build binary
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         build_version: [Debug, Release]
     timeout-minutes: 30
@@ -22,16 +23,24 @@ jobs:
     steps:
       - name: Checkout Sources
         uses: actions/checkout@v4
-
-      - name: Initialize and update submodules
-        run: git submodule update --init --recursive
-
-      - name: Prepare build directory
-        run: mkdir -p teeio-validator/build
+        with:
+          submodules: recursive
 
       - name: Build
+        working-directory: teeio-validator
         run: |
-              cd teeio-validator/build/
-              cmake -DARCH=x64 -DTOOLCHAIN=GCC -DTARGET=${{matrix.build_version}} -DCRYPTO=mbedtls ..
-              make -j
-  
+          mkdir -p build
+          cd build
+          cmake -DARCH=x64 -DTOOLCHAIN=GCC -DTARGET=${{ matrix.build_version }} -DCRYPTO=mbedtls ..
+          make -j"$(nproc)"
+
+      - name: List built binaries
+        run: ls -la teeio-validator/build/bin
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: teeio-validator-${{ matrix.build_version }}
+          path: teeio-validator/build/bin/
+          if-no-files-found: error
+          retention-days: 30
