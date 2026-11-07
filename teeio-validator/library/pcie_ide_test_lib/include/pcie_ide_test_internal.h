@@ -70,6 +70,21 @@ void pcie_ide_dump_key_switch_state(const char* tag, uint8_t* kcbar_addr, uint8_
                                     ide_common_test_port_context_t* lower_port,
                                     bool with_aer);
 
+// quiet watcher: prints only when RP key status or AER UESTA changes
+void pcie_ide_watch_rebase(uint8_t* kcbar_addr, uint8_t rp_stream_index,
+                           ide_common_test_port_context_t* upper_port,
+                           ide_common_test_port_context_t* lower_port);
+bool pcie_ide_watch_poll(const char* tag, uint8_t* kcbar_addr, uint8_t rp_stream_index,
+                         TEST_IDE_TYPE ide_type,
+                         ide_common_test_port_context_t* upper_port,
+                         ide_common_test_port_context_t* lower_port);
+
+// wait (<=3 s) until RP TX reports key set @ks active, then re-check Secure
+bool pcie_ide_wait_key_cutover(uint8_t ks, uint8_t* kcbar_addr, uint8_t rp_stream_index,
+                               TEST_IDE_TYPE ide_type,
+                               ide_common_test_port_context_t* upper_port,
+                               ide_common_test_port_context_t* lower_port);
+
 // setup ide stream
 bool setup_ide_stream(void* doe_context, void* spdm_context,
                     uint32_t* session_id, uint8_t* kcbar_addr,

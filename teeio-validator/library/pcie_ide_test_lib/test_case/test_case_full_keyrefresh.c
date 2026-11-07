@@ -110,7 +110,12 @@ void pcie_ide_keyrefresh_run_common(void *test_context)
         cmd = 'q';  // to quit
       } else {
         TEEIO_PRINT(("Wait %d seconds for next KeyRefresh. (Current KeySet is %d. Current Rounds %d).\n", g_test_interval, mKeySet, rounds));
-        libspdm_sleep(1000 * 1000 * g_test_interval);
+        pcie_ide_watch_rebase(upper_port->mapped_kcbar_addr, group_context->rp_stream_index, upper_port, lower_port);
+        for(int t = 0; t < g_test_interval * 10; t++) {
+          libspdm_sleep(100 * 1000);
+          pcie_ide_watch_poll("idle watch", upper_port->mapped_kcbar_addr, group_context->rp_stream_index,
+                              ide_type, upper_port, lower_port);
+        }
         cmd = 'c';  // Any key to continue
       }
     } else {
@@ -126,11 +131,22 @@ void pcie_ide_keyrefresh_run_common(void *test_context)
       TEEIO_DEBUG((TEEIO_DEBUG_INFO, "[kr-dbg] ===== Round %d: switch %s -> %s =====\n", rounds, k_set_names[mKeySet], k_set_names[ks]));
       pcie_ide_dump_key_switch_state("[0] round start (after idle interval)", upper_port->mapped_kcbar_addr,
                                      group_context->rp_stream_index, ide_type, upper_port, lower_port, true);
+      if(!is_ide_stream_secure(ide_type,
+                               upper_port->cfg_space_fd, upper_port->ecap_offset, upper_port->ide_id,
+                               lower_port->cfg_space_fd, lower_port->ecap_offset, lower_port->ide_id)) {
+        TEEIO_DEBUG((TEEIO_DEBUG_ERROR, "[kr-dbg] stream already Insecure at start of round %d: it died during the idle interval, not in this round.\n", rounds));
+        res = false;
+        break;
+      }
       res = ide_key_switch_to(doe_context, spdm_context, &session_id,
                               upper_port->mapped_kcbar_addr, stream_id,
                               &group_context->k_set, group_context->rp_stream_index,
                               group_context->common.lower_port.port->port_index,
                               group_context->common.top->type, upper_port, lower_port, ks, false);
+      if(res) {
+        res = pcie_ide_wait_key_cutover(ks, upper_port->mapped_kcbar_addr, group_context->rp_stream_index,
+                                        ide_type, upper_port, lower_port);
+      }
       if(!res) {
         break;
       } else {

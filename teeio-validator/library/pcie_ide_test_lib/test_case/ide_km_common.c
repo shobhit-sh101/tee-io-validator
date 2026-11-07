@@ -305,6 +305,98 @@ bool is_ide_stream_secure(TEST_IDE_TYPE ide_type,
   return true;
 }
 
+typedef struct {
+  uint32_t tx_sts;
+  uint32_t rx_sts;
+  uint32_t rp_ues;
+  uint32_t ep_ues;
+} kr_watch_t;
+
+static kr_watch_t m_kr_prev;
+static bool m_kr_prev_valid = false;
+
+static void kr_watch_read(kr_watch_t* w, uint8_t* kcbar_addr, uint8_t rp_stream_index,
+                          ide_common_test_port_context_t* upper_port,
+                          ide_common_test_port_context_t* lower_port)
+{
+  INTEL_KEYP_STREAM_CONFIG_REG_BLOCK *blk = get_stream_cfg_reg_block((INTEL_KEYP_ROOT_COMPLEX_KCBAR *)kcbar_addr, rp_stream_index);
+  uint32_t rp_aer = get_extended_cap_offset(upper_port->cfg_space_fd, PCI_AER_EXT_CAPABILITY_ID);
+  uint32_t ep_aer = get_extended_cap_offset(lower_port->cfg_space_fd, PCI_AER_EXT_CAPABILITY_ID);
+
+  w->tx_sts = mmio_read_reg32(&blk->tx_status);
+  w->rx_sts = mmio_read_reg32(&blk->rx_status);
+  w->rp_ues = rp_aer ? device_pci_read_32(rp_aer + AER_UESTA_OFFSET, upper_port->cfg_space_fd) : 0;
+  w->ep_ues = ep_aer ? device_pci_read_32(ep_aer + AER_UESTA_OFFSET, lower_port->cfg_space_fd) : 0;
+}
+
+// Start watching from the current register values.
+void pcie_ide_watch_rebase(uint8_t* kcbar_addr, uint8_t rp_stream_index,
+                           ide_common_test_port_context_t* upper_port,
+                           ide_common_test_port_context_t* lower_port)
+{
+  kr_watch_read(&m_kr_prev, kcbar_addr, rp_stream_index, upper_port, lower_port);
+  m_kr_prev_valid = true;
+}
+
+// Silent unless RP tx/rx key status or either port's AER UESTA changed; then log old->new plus a full snapshot.
+bool pcie_ide_watch_poll(const char* tag, uint8_t* kcbar_addr, uint8_t rp_stream_index,
+                         TEST_IDE_TYPE ide_type,
+                         ide_common_test_port_context_t* upper_port,
+                         ide_common_test_port_context_t* lower_port)
+{
+  kr_watch_t cur;
+  kr_watch_read(&cur, kcbar_addr, rp_stream_index, upper_port, lower_port);
+
+  if(!m_kr_prev_valid) {
+    m_kr_prev = cur;
+    m_kr_prev_valid = true;
+    return false;
+  }
+  if(cur.tx_sts == m_kr_prev.tx_sts && cur.rx_sts == m_kr_prev.rx_sts &&
+     cur.rp_ues == m_kr_prev.rp_ues && cur.ep_ues == m_kr_prev.ep_ues) {
+    return false;
+  }
+
+  TEEIO_DEBUG((TEEIO_DEBUG_INFO, "[kr-dbg] %s CHANGE: RP tx_sts 0x%08x->0x%08x  rx_sts 0x%08x->0x%08x  RP UESTA 0x%08x->0x%08x  EP UESTA 0x%08x->0x%08x\n",
+    tag, m_kr_prev.tx_sts, cur.tx_sts, m_kr_prev.rx_sts, cur.rx_sts,
+    m_kr_prev.rp_ues, cur.rp_ues, m_kr_prev.ep_ues, cur.ep_ues));
+  m_kr_prev = cur;
+  pcie_ide_dump_key_switch_state(tag, kcbar_addr, rp_stream_index, ide_type, upper_port, lower_port, true);
+  return true;
+}
+
+#define KR_CUTOVER_TIMEOUT_MS 3000
+
+// RP TX reports the new key set only after it has sent a TLP on it, so a Secure check right after K_SET_GO proves nothing about the cutover.
+bool pcie_ide_wait_key_cutover(uint8_t ks, uint8_t* kcbar_addr, uint8_t rp_stream_index,
+                               TEST_IDE_TYPE ide_type,
+                               ide_common_test_port_context_t* upper_port,
+                               ide_common_test_port_context_t* lower_port)
+{
+  INTEL_KEYP_STREAM_CONFIG_REG_BLOCK *blk = get_stream_cfg_reg_block((INTEL_KEYP_ROOT_COMPLEX_KCBAR *)kcbar_addr, rp_stream_index);
+  int waited_ms = 0;
+
+  pcie_ide_watch_rebase(kcbar_addr, rp_stream_index, upper_port, lower_port);
+  while(waited_ms < KR_CUTOVER_TIMEOUT_MS) {
+    INTEL_KEYP_STREAM_TXRX_STATUS s = {.raw = mmio_read_reg32(&blk->tx_status)};
+    if(s.stream_tx_status.key_set_status == (uint32_t)(ks + 1)) {
+      break;
+    }
+    libspdm_sleep(10 * 1000);
+    waited_ms += 10;
+    pcie_ide_watch_poll("cutover wait", kcbar_addr, rp_stream_index, ide_type, upper_port, lower_port);
+  }
+  TEEIO_DEBUG((TEEIO_DEBUG_INFO, "[kr-dbg] RP TX cutover to %s %s (waited %d ms)\n",
+    k_set_names[ks], waited_ms < KR_CUTOVER_TIMEOUT_MS ? "observed" : "NOT observed", waited_ms));
+
+  bool secure = is_ide_stream_secure(ide_type,
+                                     upper_port->cfg_space_fd, upper_port->ecap_offset, upper_port->ide_id,
+                                     lower_port->cfg_space_fd, lower_port->ecap_offset, lower_port->ide_id);
+  pcie_ide_dump_key_switch_state(secure ? "[7] after cutover wait, stream secure" : "[7] after cutover wait, FAILURE",
+                                 kcbar_addr, rp_stream_index, ide_type, upper_port, lower_port, !secure);
+  return secure;
+}
+
 // setup ide stream
 bool setup_ide_stream(void* doe_context, void* spdm_context,
                     uint32_t* session_id, uint8_t* kcbar_addr,
