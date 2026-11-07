@@ -31,7 +31,7 @@ jobs:
         run: |
           mkdir -p build
           cd build
-          cmake -DARCH=x64 -DTOOLCHAIN=GCC -DTARGET=${{ matrix.build_version }} -DCRYPTO=mbedtls ..
+          cmake -DARCH=x64 -DTOOLCHAIN=GCC -DTARGET=${{ matrix.build_version }} -DCRYPTO=mbedtls -DX509_IGNORE_CRITICAL=ON ..
           make -j"$(nproc)"
 
       - name: List built binaries

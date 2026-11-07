@@ -24,6 +24,7 @@
 
 extern int g_test_interval;
 extern int g_test_rounds;
+extern const char *k_set_names[];
 
 static uint8_t mKeySet = 0;
 
@@ -122,6 +123,9 @@ void pcie_ide_keyrefresh_run_common(void *test_context)
     } else {
       rounds++;
       uint8_t ks = mKeySet == PCI_IDE_KM_KEY_SET_K0 ? PCI_IDE_KM_KEY_SET_K1 : PCI_IDE_KM_KEY_SET_K0;
+      TEEIO_DEBUG((TEEIO_DEBUG_INFO, "[kr-dbg] ===== Round %d: switch %s -> %s =====\n", rounds, k_set_names[mKeySet], k_set_names[ks]));
+      pcie_ide_dump_key_switch_state("[0] round start (after idle interval)", upper_port->mapped_kcbar_addr,
+                                     group_context->rp_stream_index, ide_type, upper_port, lower_port, true);
       res = ide_key_switch_to(doe_context, spdm_context, &session_id,
                               upper_port->mapped_kcbar_addr, stream_id,
                               &group_context->k_set, group_context->rp_stream_index,

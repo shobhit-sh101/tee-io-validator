@@ -200,6 +200,86 @@ libspdm_return_t ide_km_key_set_go(const void *pci_doe_context,
     return LIBSPDM_STATUS_SUCCESS;
 }
 
+// AER register offsets relative to the AER extended capability
+#define AER_UESTA_OFFSET            0x04
+#define AER_CESTA_OFFSET            0x10
+#define AER_CAP_CTRL_OFFSET         0x18
+#define AER_HDR_LOG_OFFSET          0x1C
+#define AER_TLP_PREFIX_LOG_OFFSET   0x38
+#define AER_UESTA_CPL_TIMEOUT       (1u << 14)
+#define AER_UESTA_IDE_CHECK_FAILED  (1u << 28)
+#define AER_UESTA_MISROUTED_IDE_TLP (1u << 29)
+#define AER_UESTA_PCRC_CHECK_FAILED (1u << 30)
+#define AER_CAP_CTRL_PREFIX_LOG_PRESENT (1u << 11)
+
+static void dump_aer_for_debug(const char* who, int cfg_space_fd)
+{
+  uint32_t aer = get_extended_cap_offset(cfg_space_fd, PCI_AER_EXT_CAPABILITY_ID);
+  if(aer == 0) {
+    TEEIO_DEBUG((TEEIO_DEBUG_INFO, "[kr-dbg] %s: no AER ecap\n", who));
+    return;
+  }
+
+  uint32_t uesta = device_pci_read_32(aer + AER_UESTA_OFFSET, cfg_space_fd);
+  uint32_t cesta = device_pci_read_32(aer + AER_CESTA_OFFSET, cfg_space_fd);
+  uint32_t capctl = device_pci_read_32(aer + AER_CAP_CTRL_OFFSET, cfg_space_fd);
+  TEEIO_DEBUG((TEEIO_DEBUG_INFO, "[kr-dbg] %s AER@0x%03x: UESTA=0x%08x (IdeChk=%d Misrouted=%d PcrcChk=%d CplTo=%d) CESTA=0x%08x FirstErrPtr=%d\n",
+    who, aer, uesta,
+    !!(uesta & AER_UESTA_IDE_CHECK_FAILED),
+    !!(uesta & AER_UESTA_MISROUTED_IDE_TLP),
+    !!(uesta & AER_UESTA_PCRC_CHECK_FAILED),
+    !!(uesta & AER_UESTA_CPL_TIMEOUT),
+    cesta, capctl & 0x1f));
+
+  if(uesta != 0) {
+    TEEIO_DEBUG((TEEIO_DEBUG_INFO, "[kr-dbg] %s HdrLog : %08x %08x %08x %08x\n", who,
+      device_pci_read_32(aer + AER_HDR_LOG_OFFSET + 0, cfg_space_fd),
+      device_pci_read_32(aer + AER_HDR_LOG_OFFSET + 4, cfg_space_fd),
+      device_pci_read_32(aer + AER_HDR_LOG_OFFSET + 8, cfg_space_fd),
+      device_pci_read_32(aer + AER_HDR_LOG_OFFSET + 12, cfg_space_fd)));
+    if(capctl & AER_CAP_CTRL_PREFIX_LOG_PRESENT) {
+      TEEIO_DEBUG((TEEIO_DEBUG_INFO, "[kr-dbg] %s PfxLog : %08x %08x %08x %08x\n", who,
+        device_pci_read_32(aer + AER_TLP_PREFIX_LOG_OFFSET + 0, cfg_space_fd),
+        device_pci_read_32(aer + AER_TLP_PREFIX_LOG_OFFSET + 4, cfg_space_fd),
+        device_pci_read_32(aer + AER_TLP_PREFIX_LOG_OFFSET + 8, cfg_space_fd),
+        device_pci_read_32(aer + AER_TLP_PREFIX_LOG_OFFSET + 12, cfg_space_fd)));
+    }
+  }
+}
+
+// RP tx key_set_status = key set RP TX uses; RP rx last_rcvd_set_* = K bit the EP TX last sent per sub-stream.
+void pcie_ide_dump_key_switch_state(const char* tag, uint8_t* kcbar_addr, uint8_t rp_stream_index,
+                                    TEST_IDE_TYPE ide_type,
+                                    ide_common_test_port_context_t* upper_port,
+                                    ide_common_test_port_context_t* lower_port,
+                                    bool with_aer)
+{
+  INTEL_KEYP_STREAM_CONFIG_REG_BLOCK *blk = get_stream_cfg_reg_block((INTEL_KEYP_ROOT_COMPLEX_KCBAR *)kcbar_addr, rp_stream_index);
+  INTEL_KEYP_STREAM_TXRX_CONTROL tx_ctrl = {.raw = mmio_read_reg32(&blk->tx_ctrl)};
+  INTEL_KEYP_STREAM_TXRX_STATUS tx_sts = {.raw = mmio_read_reg32(&blk->tx_status)};
+  INTEL_KEYP_STREAM_TXRX_CONTROL rx_ctrl = {.raw = mmio_read_reg32(&blk->rx_ctrl)};
+  INTEL_KEYP_STREAM_TXRX_STATUS rx_sts = {.raw = mmio_read_reg32(&blk->rx_status)};
+
+  TEEIO_DEBUG((TEEIO_DEBUG_INFO, "[kr-dbg] %s\n", tag));
+  TEEIO_DEBUG((TEEIO_DEBUG_INFO, "[kr-dbg]   RP TX: ctrl=0x%08x (key_set_select=%d prime0=%d prime1=%d) status=0x%08x (key_set_status=%d ready0=%d ready1=%d)\n",
+    tx_ctrl.raw, tx_ctrl.stream_tx_control.key_set_select, tx_ctrl.stream_tx_control.prime_key_set_0, tx_ctrl.stream_tx_control.prime_key_set_1,
+    tx_sts.raw, tx_sts.stream_tx_status.key_set_status, tx_sts.stream_tx_status.ready_key_set_0, tx_sts.stream_tx_status.ready_key_set_1));
+  TEEIO_DEBUG((TEEIO_DEBUG_INFO, "[kr-dbg]   RP RX: ctrl=0x%08x (prime0=%d prime1=%d) status=0x%08x (last_rcvd pr=%d npr=%d cpl=%d ready0=%d ready1=%d)\n",
+    rx_ctrl.raw, rx_ctrl.stream_rx_control.prime_key_set_0, rx_ctrl.stream_rx_control.prime_key_set_1,
+    rx_sts.raw, rx_sts.stream_rx_status.last_rcvd_set_pr, rx_sts.stream_rx_status.last_rcvd_set_npr, rx_sts.stream_rx_status.last_rcvd_set_cpl,
+    rx_sts.stream_rx_status.ready_key_set_0, rx_sts.stream_rx_status.ready_key_set_1));
+
+  PCIE_SEL_IDE_STREAM_STATUS rp_ss = {.raw = read_stream_status_in_rp_ecap(upper_port->cfg_space_fd, upper_port->ecap_offset, ide_type, upper_port->ide_id)};
+  PCIE_SEL_IDE_STREAM_STATUS ep_ss = {.raw = read_ide_stream_status_in_ecap(lower_port->cfg_space_fd, ide_type, lower_port->ide_id, lower_port->ecap_offset)};
+  TEEIO_DEBUG((TEEIO_DEBUG_INFO, "[kr-dbg]   StreamStatus RP=0x%08x (state=%d chkfail_msg=%d)  EP=0x%08x (state=%d chkfail_msg=%d)\n",
+    rp_ss.raw, rp_ss.state, rp_ss.recv_intg_check_fail_msg, ep_ss.raw, ep_ss.state, ep_ss.recv_intg_check_fail_msg));
+
+  if(with_aer) {
+    dump_aer_for_debug("RP", upper_port->cfg_space_fd);
+    dump_aer_for_debug("EP", lower_port->cfg_space_fd);
+  }
+}
+
 bool is_ide_stream_secure(TEST_IDE_TYPE ide_type,
                           int rp_cfg_space_fd, uint32_t rp_ecap_offset, uint8_t rp_ide_id,
                           int ep_cfg_space_fd, uint32_t ep_ecap_offset, uint8_t ep_ide_id)
@@ -480,6 +560,8 @@ bool ide_key_switch_to(void* doe_context, void* spdm_context,
 
     // step 2: program keys in rp/dev in RX/TX direction
 
+  pcie_ide_dump_key_switch_state("[1] before KEY_PROG (baseline)", kcbar_addr, rp_stream_index, ide_type, upper_port, lower_port, true);
+
   // Before programming keys, we shall find empty key/iv slot
   while(true) {
     if(pcie_ide_alloc_slot_ids(upper_port, rp_stream_index, k_set)) {
@@ -541,6 +623,8 @@ bool ide_key_switch_to(void* doe_context, void* spdm_context,
 
   prime_rp_ide_key_set((INTEL_KEYP_ROOT_COMPLEX_KCBAR *)kcbar_addr, rp_stream_index, PCIE_IDE_STREAM_TX, ks);
 
+  pcie_ide_dump_key_switch_state("[2] after KEY_PROG + prime, before KSetGo", kcbar_addr, rp_stream_index, ide_type, upper_port, lower_port, false);
+
   if(skip_ksetgo) {
     return true;
   }
@@ -575,9 +659,14 @@ bool ide_key_switch_to(void* doe_context, void* spdm_context,
     return false;
   }
 
+  // RP TX has not toggled K yet, so an EP error here means EP RX dropped the old key set early.
+  pcie_ide_dump_key_switch_state("[3] after dev RX KSetGo x3, before RP key_set_select", kcbar_addr, rp_stream_index, ide_type, upper_port, lower_port, true);
+
   // set key_set_select in host ide
   INTEL_KEYP_ROOT_COMPLEX_KCBAR *kcbar = (INTEL_KEYP_ROOT_COMPLEX_KCBAR *)kcbar_addr;
   set_rp_ide_key_set_select(kcbar, rp_stream_index, ks);
+
+  pcie_ide_dump_key_switch_state("[4] right after RP key_set_select", kcbar_addr, rp_stream_index, ide_type, upper_port, lower_port, true);
 
   TEEIO_DEBUG((TEEIO_DEBUG_INFO, "KSetGo %s|TX|PR\n", k_set_names[ks]));
   status = ide_km_key_set_go(doe_context, spdm_context, session_id, stream_id,
@@ -608,11 +697,16 @@ bool ide_key_switch_to(void* doe_context, void* spdm_context,
     return false;
   }
 
+  pcie_ide_dump_key_switch_state("[5] after dev TX KSetGo x3", kcbar_addr, rp_stream_index, ide_type, upper_port, lower_port, true);
+
   // wait for 10 ms for device to get ide ready
   libspdm_sleep(10 * 1000);
 
   // Now ide stream shall be in secure state
-  return is_ide_stream_secure(ide_type,
+  bool secure = is_ide_stream_secure(ide_type,
                               upper_port_cfg_space_fd, upper_port_ecap_offset, upper_port->ide_id,
                               lower_port->cfg_space_fd, lower_port->ecap_offset, lower_port->ide_id);
+  pcie_ide_dump_key_switch_state(secure ? "[6] switch complete, stream secure" : "[6] FAILURE",
+                                 kcbar_addr, rp_stream_index, ide_type, upper_port, lower_port, !secure);
+  return secure;
 }

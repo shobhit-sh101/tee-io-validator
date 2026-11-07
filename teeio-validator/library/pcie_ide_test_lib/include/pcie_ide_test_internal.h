@@ -63,6 +63,13 @@ bool is_ide_stream_secure(TEST_IDE_TYPE ide_type,
                           int ep_cfg_space_fd, uint32_t ep_ecap_offset, uint8_t ep_ide_id
 );
 
+// debug snapshot of RP KCBAR tx/rx status, both stream status regs and (optionally) AER on both ports
+void pcie_ide_dump_key_switch_state(const char* tag, uint8_t* kcbar_addr, uint8_t rp_stream_index,
+                                    TEST_IDE_TYPE ide_type,
+                                    ide_common_test_port_context_t* upper_port,
+                                    ide_common_test_port_context_t* lower_port,
+                                    bool with_aer);
+
 // setup ide stream
 bool setup_ide_stream(void* doe_context, void* spdm_context,
                     uint32_t* session_id, uint8_t* kcbar_addr,
