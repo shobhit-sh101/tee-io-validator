@@ -28,6 +28,9 @@ jobs:
 
       - name: Build
         working-directory: teeio-validator
+        env:
+          # CMake 4.x on the runner rejects cmake_minimum_required < 3.5 used here and in submodules
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
         run: |
           mkdir -p build
           cd build
