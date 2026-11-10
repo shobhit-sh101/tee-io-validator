@@ -307,6 +307,25 @@ InitRootPortFail:
  * the key/iv slots allocated for these substreams are continuous. For
  * example, 0|1|2 or 3|4|5.
  */
+
+// FM erratum: a TLP encrypted with TX key index 0 can be corrupted. Swap index 0 with the empty slot 12 so the RP never uses index 0.
+#define PCIE_IDE_SWAP_KEY_SLOT_A 0
+#define PCIE_IDE_SWAP_KEY_SLOT_B 12
+
+static uint32_t swap_key_slot(uint32_t slot, int num_key_iv_slots)
+{
+  if(num_key_iv_slots <= PCIE_IDE_SWAP_KEY_SLOT_B) {
+    return slot;
+  }
+  if(slot == PCIE_IDE_SWAP_KEY_SLOT_A) {
+    return PCIE_IDE_SWAP_KEY_SLOT_B;
+  }
+  if(slot == PCIE_IDE_SWAP_KEY_SLOT_B) {
+    return PCIE_IDE_SWAP_KEY_SLOT_A;
+  }
+  return slot;
+}
+
 bool pcie_ide_alloc_slot_ids(ide_common_test_port_context_t* port_context, uint8_t rp_stream_index, ide_key_set_t* k_set)
 {
   int i = 0;
@@ -366,32 +385,46 @@ bool pcie_ide_alloc_slot_ids(ide_common_test_port_context_t* port_context, uint8
                                     keyset.pr, keyset.npr, keyset.cpl));
 
     TEEIO_ASSERT(keyset.pr < num_key_iv_slots);
-    TEEIO_ASSERT(keyset.pr % 3 == 0);
     TEEIO_ASSERT(keyset.npr < num_key_iv_slots);
     TEEIO_ASSERT(keyset.cpl < num_key_iv_slots);
 
-    key_iv_slot_usage_map = (1 << keyset.pr/3) | key_iv_slot_usage_map;
+    // KCBAR holds physical slots; convert back to the logical triple before marking it used.
+    uint32_t logical_pr = swap_key_slot(keyset.pr, num_key_iv_slots);
+    TEEIO_ASSERT(logical_pr % 3 == 0);
+
+    key_iv_slot_usage_map = (1 << logical_pr/3) | key_iv_slot_usage_map;
   }
 
   TEEIO_DEBUG((TEEIO_DEBUG_INFO, "key/iv slot usage: key_iv_slot_usage_map=%02x\n", key_iv_slot_usage_map));
   for(i = 0; i < num_key_iv_slots / 3; i++) {
     uint8_t key_iv_slot = (key_iv_slot_usage_map >> i) & 0x1;
+    // The triple holding logical slot 12 would map its PR onto physical slot 0, so never hand it out.
+    if(num_key_iv_slots > PCIE_IDE_SWAP_KEY_SLOT_B && i == PCIE_IDE_SWAP_KEY_SLOT_B / 3) {
+      continue;
+    }
     // 0 indicates the slots are free, 1 indicates the slots are occupied.
     if(key_iv_slot == 0) {
-      k_set->slot_id[PCIE_IDE_STREAM_RX][PCIE_IDE_SUB_STREAM_PR] = i * 3;
-      k_set->slot_id[PCIE_IDE_STREAM_RX][PCIE_IDE_SUB_STREAM_NPR] = i * 3 + 1;
-      k_set->slot_id[PCIE_IDE_STREAM_RX][PCIE_IDE_SUB_STREAM_CPL] = i * 3 + 2;
+      uint32_t pr_slot = swap_key_slot(i * 3, num_key_iv_slots);
+      uint32_t npr_slot = swap_key_slot(i * 3 + 1, num_key_iv_slots);
+      uint32_t cpl_slot = swap_key_slot(i * 3 + 2, num_key_iv_slots);
 
-      k_set->slot_id[PCIE_IDE_STREAM_TX][PCIE_IDE_SUB_STREAM_PR] = i * 3;
-      k_set->slot_id[PCIE_IDE_STREAM_TX][PCIE_IDE_SUB_STREAM_NPR] = i * 3 + 1;
-      k_set->slot_id[PCIE_IDE_STREAM_TX][PCIE_IDE_SUB_STREAM_CPL] = i * 3 + 2;
+      k_set->slot_id[PCIE_IDE_STREAM_RX][PCIE_IDE_SUB_STREAM_PR] = pr_slot;
+      k_set->slot_id[PCIE_IDE_STREAM_RX][PCIE_IDE_SUB_STREAM_NPR] = npr_slot;
+      k_set->slot_id[PCIE_IDE_STREAM_RX][PCIE_IDE_SUB_STREAM_CPL] = cpl_slot;
+
+      k_set->slot_id[PCIE_IDE_STREAM_TX][PCIE_IDE_SUB_STREAM_PR] = pr_slot;
+      k_set->slot_id[PCIE_IDE_STREAM_TX][PCIE_IDE_SUB_STREAM_NPR] = npr_slot;
+      k_set->slot_id[PCIE_IDE_STREAM_TX][PCIE_IDE_SUB_STREAM_CPL] = cpl_slot;
       found = true;
       break;
     }
   }
 
   if(found) {
-    TEEIO_DEBUG((TEEIO_DEBUG_INFO, "Find free key/iv slots: pr=%d, npr=%d, cpl=%d\n", i*3, i*3 + 1, i*3 + 2));
+    TEEIO_DEBUG((TEEIO_DEBUG_INFO, "Find free key/iv slots: pr=%d, npr=%d, cpl=%d\n",
+                 k_set->slot_id[PCIE_IDE_STREAM_TX][PCIE_IDE_SUB_STREAM_PR],
+                 k_set->slot_id[PCIE_IDE_STREAM_TX][PCIE_IDE_SUB_STREAM_NPR],
+                 k_set->slot_id[PCIE_IDE_STREAM_TX][PCIE_IDE_SUB_STREAM_CPL]));
   } else {
     TEEIO_DEBUG((TEEIO_DEBUG_ERROR, "Failed to find free key/iv slots.\n"));
   }
